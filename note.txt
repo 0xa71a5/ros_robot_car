@@ -1,0 +1,42 @@
+right : 0.034328 cm/cnt
+
+
+command:
+
+/*
+    Data format:
+    |--magic--|---header---|---body---|
+      0    1     2:3           4:N
+     0x5a 0x3c  body size      body
+ */
+
+Test command:
+
+5a 3c 02 00 aa bb
+
+
+Body format
+
+|--- type ---|--- params ---|
+	  0            1~N-1
+
+
+===================================================
+PC to MCU 
+---------
+
+|---0x5a---|---length---|---cmd_type0---|---cmd_type1---|---DATA0---|---DATA1---|...|---DATAN---|---CRC---|
+    magic 	total length
+===================================================
+
+请求获取version
+5a 06 01 f1 00 d7
+
+请求获取ODOM, Vx, Vy, Vyaw, YawZ
+5a 06 01 11 00 a2
+
+请求获取电池电量
+5a 06 01 07 00 e4
+
+获取IMU数据
+5a 06 01 13 00 33
