@@ -1,6 +1,7 @@
 #include <Wire.h>
 #include <MechaQMC5883.h>
 #include <MPU9250.h>
+#include <TimerThree.h>
 #include "queue.h"
 #include "crc.h"
 #include "log.h"
@@ -21,8 +22,8 @@
 
 #define MAX_ANALOG_VALUE 255
 
-volatile unsigned long left_enc_cnt = 0;
-volatile unsigned long right_enc_cnt = 0;
+volatile int32_t left_enc_cnt = 0;
+volatile int32_t right_enc_cnt = 0;
 
 float distance_per_cnt = 0.00034328;// m/cnt
 
@@ -95,75 +96,57 @@ void stop_loose_right_wheel(void)
     digitalWrite(R_DIR1, 1);
 }
 
-
+int aaa = 0;
+int b[8] = {0};
 void left_encode_isr(void)
 {
+    aaa++;
     if (digitalRead(L_ENC0) == 0) {
-        if (digitalRead(L_ENC1) == 1)
+        if (digitalRead(L_ENC1) == 1) {
             left_enc_cnt--;
-        else
+            b[0]++;
+        }
+        else {
             left_enc_cnt++;
+            b[1]++;
+        }
     } else {
-        if (digitalRead(L_ENC1) == 0)
+        if (digitalRead(L_ENC1) == 0) {
             left_enc_cnt--;
-        else
+            b[2]++;
+        }
+        else {
             left_enc_cnt++;
+            b[3]++;
+        }
     }
 }
 
 void right_encode_isr(void)
 {
+    aaa--;
     if (digitalRead(R_ENC0) == 0) {
-        if (digitalRead(R_ENC1) == 1)
+        if (digitalRead(R_ENC1) == 1) {
             right_enc_cnt--;
-        else
+            b[4]++;
+        }
+        else {
             right_enc_cnt++;
+            b[5]++;
+        }
     } else {
-        if (digitalRead(R_ENC1) == 0)
+        if (digitalRead(R_ENC1) == 0) {
             right_enc_cnt--;
-        else
+            b[6]++;
+        }
+        else {
             right_enc_cnt++;
+            b[7]++;
+        }
     }
 }
 
 MPU9250 IMU(Wire,0x68);
-
-
-
-void loop_test() {
-    int count = 0;
-    int l_enc0_val, l_enc1_val, r_enc0_val, r_enc1_val;
-    int interval = 100;
-    char output_str[64];
-    int x,y,z;
-    float angle;
-
-    set_left_wheel_forward();
-    set_right_wheel_forward();
-    set_left_wheel_speed(0);
-    set_right_wheel_speed(0);
-
-    stop_loose_left_wheel();
-    stop_loose_right_wheel();
-    while (1) {
-        //compass.read(&x, &y, &z, &angle);
-        Serial.println(angle);
-        delay(100);
-    }
-
-    while (1) {
-        l_enc0_val = digitalRead(L_ENC0);
-        l_enc1_val = digitalRead(L_ENC1);
-        r_enc0_val = digitalRead(R_ENC0);
-        r_enc1_val = digitalRead(R_ENC1);
-
-        sprintf(output_str, "[%-4d] (%d,%d) (%d,%d)\n", count, l_enc0_val,
-                        l_enc1_val, r_enc0_val, r_enc1_val);
-        Serial.print(output_str);
-        count++;
-        delay(interval);
-    }
-}
 
 enum STATE_SEARCH {
     STATE_SEARCH_MAGIC0,
@@ -185,7 +168,7 @@ Queue<uint8_t> rx_buffer(RX_BUFFER_SIZE);
 
 uint8_t command_raw[MAX_BODY_LENGTH] = {0};
 uint8_t parser_state = STATE_SEARCH_MAGIC0;
-#define SPEED_CMD_TIMEOUT_MS 300
+#define SPEED_CMD_TIMEOUT_MS 600
 uint32_t speed_check_time = 0;
 
 #define MSG_GET_VERSION         0xf1
@@ -532,6 +515,119 @@ uint8_t message_size = 0;
 #define TASK_PERIOD_MS 20
 #define BODY_OFFSET 4
 
+uint32_t sched_tick = 0;
+
+/*
+ * definitions for speed control
+ */
+uint32_t last_speed_time = 0;
+int32_t expect_left_speed = 0;
+int32_t expect_right_speed = 0;
+int32_t real_left_speed = 0;
+int32_t real_right_speed = 0;
+int32_t left_output_power = 0;
+int32_t right_output_power = 0;
+
+float sc_kp = 5;
+float sc_ki = 1;
+
+#define VELOCITY_STAT_PERIOD  500000
+#define VELOCITY_STAT_PERIOD_S  (VELOCITY_STAT_PERIOD / 1000000.0)
+#define METRE_PER_SECOND 0.034328;
+float left_speed = 0, right_speed = 0;
+
+int speed_calc(float *left_speed, float *right_speed)
+{
+    static int32_t last_left_enc_cnt = 0;
+    static int32_t last_right_enc_cnt = 0;
+    static uint32_t last_record_time = 0;
+    float time_delt = (float)(millis() - last_record_time) / 1000;
+
+    if (time_delt == 0) {
+        *left_speed = 0;
+        *right_speed = 0;
+        pr_warn("speed_calc got zero delt time!\n");
+        return -EINVAL;
+    }
+
+    *left_speed = distance_per_cnt * (float)(left_enc_cnt - last_left_enc_cnt) / time_delt;
+    *right_speed = distance_per_cnt * (float)(right_enc_cnt - last_right_enc_cnt) / time_delt;
+
+    last_left_enc_cnt = left_enc_cnt;
+    last_right_enc_cnt = right_enc_cnt;
+    last_record_time = millis();
+
+    return 0;
+}
+
+struct wheel_power_info {
+    uint16_t left_power;
+    uint16_t right_power;
+    int16_t  left_direction;
+    int16_t  right_direction;
+};
+
+#define MAX_POWER_OUTPUT 255
+
+int speed_write(struct wheel_power_info *info)
+{
+    if (info->left_direction > 0)
+        set_left_wheel_forward();
+    else if (info->left_direction < 0)
+        set_left_wheel_backward();
+    else
+        stop_loose_left_wheel();
+
+    if (info->right_direction > 0)
+        set_right_wheel_forward();
+    else if (info->right_direction < 0)
+        set_right_wheel_backward();
+    else
+        stop_loose_right_wheel();
+
+    set_left_wheel_speed(info->left_power);
+    set_right_wheel_speed(info->right_power);
+    return 0;
+}
+
+int speed_pid_calc(float expected_left_speed, float expected_right_speed,
+                      float current_left_speed, float current_right_speed,
+                      struct wheel_power_info *info)
+{
+    float left_speed_err, right_speed_err;
+    static float last_left_speed_err = 0, last_right_speed_err = 0 ;
+    static float sum_left_speed_err = 0, sum_right_speed_err = 0;
+    float left_output, right_output;
+    float kp = 200;
+    float ki = -30;
+    float kd = 30;
+
+    // TODO: need to add a speed filter
+    left_speed_err = expected_left_speed - current_left_speed;
+    sum_left_speed_err += left_speed_err;
+    left_output = kp * left_speed_err + ki * (left_speed_err - last_left_speed_err) + kd * sum_left_speed_err;
+
+    right_speed_err = expected_right_speed - current_right_speed;
+    sum_right_speed_err += right_speed_err;
+    right_output = kp * right_speed_err + ki * (right_speed_err - last_right_speed_err) + kd * sum_right_speed_err;
+
+    last_left_speed_err = left_speed_err;
+    last_right_speed_err = right_speed_err;
+
+    info->left_power = abs(left_output);
+    if (info->left_power > MAX_POWER_OUTPUT)
+        info->left_power = MAX_POWER_OUTPUT;
+
+    info->right_power = abs(right_output);
+    if (info->right_power > MAX_POWER_OUTPUT)
+        info->right_power = MAX_POWER_OUTPUT;
+
+    info->left_direction = left_output > 0 ? 1 : -1;
+    info->right_direction = right_output > 0 ? 1 : -1;
+
+    return 0;
+}
+
 void setup() {
     Serial.begin(2000000);
     Serial3.begin(115200);
@@ -557,19 +653,58 @@ void setup() {
     digitalWrite(R_EN, 0);
 
     attachInterrupt(digitalPinToInterrupt(L_ENC0), left_encode_isr, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(R_ENC0), right_encode_isr, RISING);
+    attachInterrupt(digitalPinToInterrupt(R_ENC0), right_encode_isr, CHANGE);
+
+    // timer period unit is 50 ms
+    //Timer3.initialize(VELOCITY_STAT_PERIOD);
+    //Timer3.attachInterrupt(system_scheduler_entry);
     pr_raw("\n=====> Robot software start <=====\n");
 }
 
+int serial_get_speed(float *speed)
+{
+    int speed_num = 0;
+    float flag = 1;
+    char word;
+    int ret = 0;
+
+    while (Serial.available()) {
+        word = (char)Serial.read();
+        if (word == '-')
+            flag = -1;
+        else if (word >= '0' && word <= '9') {
+            speed_num *= 10;
+            speed_num += (word - '0');
+        }
+        delay(2);
+        ret = 1;
+    }
+
+    if (ret)
+        *speed = (float)speed_num * flag / 100;
+
+    return ret;
+}
 
 void loop()
 {
     float acc_x, acc_y;
+    float left_speed, right_speed;
+    float left_power = 0, right_power = 0;
     uint32_t last_check_time;
+    struct wheel_power_info info;
+    float input = 0;
+    float target_speed = 0.4;
 
-    // TODO: Here needs to change to Serial. not Serial3
-    while (Serial3.available()) {
-        rx_buffer.push(Serial3.read());
+    while (1) {
+        if (serial_get_speed(&input))
+            target_speed = input;
+
+        speed_calc(&left_speed, &right_speed);
+        speed_pid_calc(0, target_speed, left_speed, right_speed, &info);
+        speed_write(&info);
+        pr_debug("%f, %f %f, %u %u, %d %d\n", target_speed, left_speed, right_speed, info.left_power, info.right_power, info.left_direction, info.right_direction);
+        delay(100);
     }
 
     //IMU.readSensor();
