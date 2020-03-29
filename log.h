@@ -5,8 +5,8 @@
 
 #ifndef LOG_WITH_TIMESTAMP
 #define TRACE(...)  do {\
-                            printf("TRACE: %3d %-10s:", __LINE__, __func__);\
-                            printf(__VA_ARGS__);\
+                            //printf("TRACE: %3d %-10s:", __LINE__, __func__);\
+                            //printf(__VA_ARGS__);\
                     } while (0)
 
 #define pr_warn(...)  do {\
@@ -31,10 +31,10 @@
 
 #else
 
-#define TRACE(...)  do {\
-                            printf("[%lu] TRACE: %3d %-10s:", millis(), __LINE__, __func__);\
-                            printf(__VA_ARGS__);\
-                    } while (0)
+#define TRACE(...)  //do {\
+                            //printf("[%lu] TRACE: %3d %-10s:", millis(), __LINE__, __func__);\
+                            //printf(__VA_ARGS__);\
+                    //} while (0)
 
 #define pr_warn(...)  do {\
                             printf("[%lu] WARN : ", millis());\

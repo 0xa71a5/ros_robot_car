@@ -248,13 +248,10 @@ void send_response(uint8_t *send_buffer)
         return;
     }
 
-    pr_debug("send size=%u, send_buffer=0x%04x\n", send_size, send_buffer);
-    pr_debug("resp ===> [");
+    TRACE("send size=%u, send_buffer=0x%04x\n", send_size, send_buffer);
     for (i = 0; i < send_size; i++) {
         Serial3.write(send_buffer[i]);
-        pr_raw(" 0x%x", send_buffer[i]);
     }
-    pr_raw("]\n");
 }
 
 
@@ -344,29 +341,14 @@ int robot_get_imu(uint8_t *data_area)
 
 int robot_vel_control(float vx, float vy, float vyaw)
 {
-    int left_speed, right_speed;
+    float left_target_speed, right_target_speed;
+    float robot_half_width = 0.122;
 
-    pr_debug("recv new robot vel control cmd: vx=%.3f vy=%.3f vyaw=%.3f\n",
-              vx, vy, vyaw);
-
-    if (vx > 0) {
-        set_left_wheel_forward();
-        set_right_wheel_forward();
-    } else if (vx < 0) {
-        set_left_wheel_backward();
-        set_right_wheel_backward();
-    }
-
-    vx = abs(vx);
-    if (vx > 1)
-        vx = 1;
-
-    left_speed = vx * 256;
-    right_speed = vx * 256;
-
-    pr_debug("Set speed, left=%d right=%d\n", left_speed, right_speed);
-    set_left_wheel_speed(left_speed);
-    set_right_wheel_speed(right_speed);
+    left_target_speed = 0.5 * (vx - vyaw * robot_half_width);
+    right_target_speed = 0.5 * (vx + vyaw * robot_half_width);
+    update_target_speed_setting(left_target_speed, right_target_speed);
+    pr_debug("recv new robot vel control cmd: vx=%.3f vy=%.3f vyaw=%.3f, transfer to left=%f right=%f\n",
+              vx, vy, vyaw, left_target_speed, right_target_speed);
 
     return SUCCESS;
 }
@@ -393,13 +375,15 @@ int parse_command_loop(uint8_t *command_raw, uint16_t command_size)
     }
 
     msg_type = command_raw[3];
+    crc = crc_calculate(command_raw, command_size - 1);
+
+#if defined(DEBUG_COMMAND_OUTPUT)
     pr_debug("Receive new command, size:%u, type:0x%02x data = [", command_size, msg_type);
     for (i = 0; i < command_size; i++) {
         pr_raw(" 0x%x", command_raw[i]);
     }
-
-    crc = crc_calculate(command_raw, command_size - 1);
     pr_raw(" ] |===> crc=0x%x\n", crc);
+#endif
 
 #ifdef DO_CHECK_CRC
     if (crc != command_raw[command_size - 1]) {
@@ -408,7 +392,6 @@ int parse_command_loop(uint8_t *command_raw, uint16_t command_size)
         return -EPIPE;
     }
 #endif
-
 
     switch (msg_type) {
         case MSG_GET_VERSION:
@@ -488,7 +471,6 @@ int parse_command_loop(uint8_t *command_raw, uint16_t command_size)
         if (robot_vel_control(vx, vy, vyaw)) {
             pr_err("robot_vel_control failed!\n");
         }
-
         return;
 
 
@@ -500,7 +482,6 @@ int parse_command_loop(uint8_t *command_raw, uint16_t command_size)
     // Fill crc and send out response
     send_buffer_fill_crc(send_buffer);
     send_response(send_buffer);
-    pr_raw("\n");
 
     return SUCCESS;
 }
@@ -557,6 +538,9 @@ int speed_calc(float *left_speed, float *right_speed)
     last_right_enc_cnt = right_enc_cnt;
     last_record_time = millis();
 
+    // Update speed value
+    update_current_speed_value(*left_speed, *right_speed);
+
     return 0;
 }
 
@@ -607,6 +591,7 @@ int speed_pid_calc(float expected_left_speed, float expected_right_speed,
     sum_left_speed_err += left_speed_err;
     left_output = kp * left_speed_err + ki * (left_speed_err - last_left_speed_err) + kd * sum_left_speed_err;
 
+    // TODO: judge the speed sum limits
     right_speed_err = expected_right_speed - current_right_speed;
     sum_right_speed_err += right_speed_err;
     right_output = kp * right_speed_err + ki * (right_speed_err - last_right_speed_err) + kd * sum_right_speed_err;
@@ -614,11 +599,20 @@ int speed_pid_calc(float expected_left_speed, float expected_right_speed,
     last_left_speed_err = left_speed_err;
     last_right_speed_err = right_speed_err;
 
-    info->left_power = abs(left_output);
+    // TODO: here need to add macro
+    if (abs(expected_left_speed) < 0.003)
+        info->left_power = 0;
+    else
+        info->left_power = abs(left_output);
+
     if (info->left_power > MAX_POWER_OUTPUT)
         info->left_power = MAX_POWER_OUTPUT;
 
-    info->right_power = abs(right_output);
+    if (abs(expected_right_speed) < 0.003)
+        info->right_power = 0;
+    else
+        info->right_power = abs(right_output);
+
     if (info->right_power > MAX_POWER_OUTPUT)
         info->right_power = MAX_POWER_OUTPUT;
 
@@ -655,6 +649,7 @@ void setup() {
     attachInterrupt(digitalPinToInterrupt(L_ENC0), left_encode_isr, CHANGE);
     attachInterrupt(digitalPinToInterrupt(R_ENC0), right_encode_isr, CHANGE);
 
+    update_target_speed_setting(0, 0);
     // timer period unit is 50 ms
     //Timer3.initialize(VELOCITY_STAT_PERIOD);
     //Timer3.attachInterrupt(system_scheduler_entry);
@@ -686,39 +681,87 @@ int serial_get_speed(float *speed)
     return ret;
 }
 
+void speed_control_function(float target_left_speed, float target_right_speed)
+{
+    struct wheel_power_info info;
+    float left_speed, right_speed;
+    static uint32_t last_time = 0;
+
+    speed_calc(&left_speed, &right_speed);
+    speed_pid_calc(target_left_speed, target_right_speed, left_speed, right_speed, &info);
+    speed_write(&info);
+
+    if (millis() - last_time > 500) {
+        pr_debug("target speed:%f %f, true speed:%f %f, power output:%u %u, dir:%d %d\n",
+            target_left_speed, target_right_speed, left_speed, right_speed, info.left_power, info.right_power,
+            info.left_direction, info.right_direction);
+        last_time = millis();
+    }
+}
+
+float global_target_left_speed = 0;
+float global_target_right_speed = 0;
+float global_current_left_speed = 0;
+float global_current_right_speed = 0;
+
+void get_target_speed_setting(float *left, float *right)
+{
+    *left = global_target_left_speed;
+    *right = global_target_right_speed;
+}
+
+void update_target_speed_setting(float left, float right)
+{
+    global_target_left_speed = left;
+    global_target_right_speed = right;
+}
+
+void get_current_speed_value(float *left, float *right)
+{
+    *left = global_current_left_speed;
+    *right = global_current_right_speed;
+}
+
+void update_current_speed_value(float left, float right)
+{
+    global_current_left_speed = left;
+    global_current_right_speed = right;
+}
+
+void speed_control_task(void)
+{
+    static uint32_t last_control_time = 0;
+    uint32_t current_time = millis();
+    uint32_t control_interval = 20;
+    float left = 0, right = 0;
+
+    if (current_time - last_control_time >= control_interval) {
+        get_target_speed_setting(&left, &right);
+        speed_control_function(left, right);
+        last_control_time = current_time;
+    }
+}
+
 void loop()
 {
     float acc_x, acc_y;
-    float left_speed, right_speed;
-    float left_power = 0, right_power = 0;
     uint32_t last_check_time;
-    struct wheel_power_info info;
-    float input = 0;
-    float target_speed = 0.4;
-
-    while (1) {
-        if (serial_get_speed(&input))
-            target_speed = input;
-
-        speed_calc(&left_speed, &right_speed);
-        speed_pid_calc(0, target_speed, left_speed, right_speed, &info);
-        speed_write(&info);
-        pr_debug("%f, %f %f, %u %u, %d %d\n", target_speed, left_speed, right_speed, info.left_power, info.right_power, info.left_direction, info.right_direction);
-        delay(100);
-    }
-
     //IMU.readSensor();
     //acc_x = IMU.getAccelX_mss();
     //acc_y = IMU.getAccelY_mss();
+    while (Serial3.available()) {
+        rx_buffer.push(Serial3.read());
+    }
 
     last_check_time = millis();
 
     if (millis() - speed_check_time > SPEED_CMD_TIMEOUT_MS) {
-        // set speed to zero
-        pr_debug("cmd_vel not recv within %dms, stop moving\n", SPEED_CMD_TIMEOUT_MS);
+        //pr_debug("cmd_vel not recv within %dms, stop moving\n", SPEED_CMD_TIMEOUT_MS);
         robot_vel_control(0, 0, 0);
         speed_check_time = millis();
     }
+
+    speed_control_task();
 
     while (rx_buffer.count()) {
         if (millis() - last_check_time > TASK_PERIOD_MS) {
