@@ -27,6 +27,8 @@ volatile int32_t right_enc_cnt = 0;
 
 float distance_per_cnt = 0.00034328;// m/cnt
 
+#define ROBOT_HALF_WIDTH 0.122
+
 void set_left_wheel_forward(void)
 {
     digitalWrite(L_DIR0, 1);
@@ -269,17 +271,23 @@ int robot_get_battery(uint8_t *data_area)
     return SUCCESS;
 }
 
+float get_current_yaw_angle(void)
+{
+    return 0;
+}
+
 int robot_get_odom(uint8_t *data_area)
 {
-    static uint32_t last_time = 0;
-    uint16_t velocity_vx = 100;
-    uint16_t velocity_vyaw = 0;
-    static uint16_t yaw_z = 0;
+    float left_speed = 0, right_speed = 0;
 
-    if (millis() - last_time > 10000) {
-        last_time = millis();
-        yaw_z = 90 - yaw_z;
-    }
+    int16_t velocity_vx = 0;
+    int16_t velocity_vyaw = 0;
+    int16_t yaw_z = 0;
+
+    get_current_speed_value(&left_speed, &right_speed);
+    velocity_vx = 1000 * (left_speed + right_speed);
+    velocity_vyaw = 1000 * (right_speed - left_speed) / ROBOT_HALF_WIDTH;
+    yaw_z = 100 * get_current_yaw_angle();
 
     data_area[0] = velocity_vx >> 8;
     data_area[1] = velocity_vx & 0xff;
@@ -339,13 +347,13 @@ int robot_get_imu(uint8_t *data_area)
     return SUCCESS;
 }
 
+
 int robot_vel_control(float vx, float vy, float vyaw)
 {
     float left_target_speed, right_target_speed;
-    float robot_half_width = 0.122;
 
-    left_target_speed = 0.5 * (vx - vyaw * robot_half_width);
-    right_target_speed = 0.5 * (vx + vyaw * robot_half_width);
+    left_target_speed = 0.5 * (vx - vyaw * ROBOT_HALF_WIDTH);
+    right_target_speed = 0.5 * (vx + vyaw * ROBOT_HALF_WIDTH);
     update_target_speed_setting(left_target_speed, right_target_speed);
     pr_debug("recv new robot vel control cmd: vx=%.3f vy=%.3f vyaw=%.3f, transfer to left=%f right=%f\n",
               vx, vy, vyaw, left_target_speed, right_target_speed);
