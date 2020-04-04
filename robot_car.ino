@@ -1,7 +1,4 @@
-#include <Wire.h>
-#include <MechaQMC5883.h>
-#include <MPU9250.h>
-#include <TimerThree.h>
+#include "imu.h"
 #include "queue.h"
 #include "crc.h"
 #include "log.h"
@@ -148,8 +145,6 @@ void right_encode_isr(void)
     }
 }
 
-MPU9250 IMU(Wire,0x68);
-
 enum STATE_SEARCH {
     STATE_SEARCH_MAGIC0,
     STATE_READ_LENTH,
@@ -273,7 +268,10 @@ int robot_get_battery(uint8_t *data_area)
 
 float get_current_yaw_angle(void)
 {
-    return 0;
+    float yaw = 0;
+
+    imu_get_yaw(&yaw);
+    return yaw;
 }
 
 int robot_get_odom(uint8_t *data_area)
@@ -647,9 +645,8 @@ void setup() {
     pinMode(13, OUTPUT);
     digitalWrite(13, 0);
 
-    //if (IMU.begin() < 0) {
-    //    pr_err("IMU initialization failed!\n");
-    //}
+    if (imu_initialize() < 0)
+        pr_raw("IMU initialization failed!\n");
 
     digitalWrite(L_EN, 0);
     digitalWrite(R_EN, 0);
@@ -661,7 +658,7 @@ void setup() {
     // timer period unit is 50 ms
     //Timer3.initialize(VELOCITY_STAT_PERIOD);
     //Timer3.attachInterrupt(system_scheduler_entry);
-    pr_raw("\n=====> Robot software start <=====\n");
+    pr_raw("\n===============> Robot software start <===============\n");
 }
 
 int serial_get_speed(float *speed)
@@ -752,11 +749,8 @@ void speed_control_task(void)
 
 void loop()
 {
-    float acc_x, acc_y;
     uint32_t last_check_time;
-    //IMU.readSensor();
-    //acc_x = IMU.getAccelX_mss();
-    //acc_y = IMU.getAccelY_mss();
+
     while (Serial3.available()) {
         rx_buffer.push(Serial3.read());
     }
